@@ -1,0 +1,118 @@
+"""
+================= 产品规则配置文件 =================
+
+本文件为产品规则源（Single Source of Truth）
+
+以下规则被 GUI / Excel 自动引用：
+1. SKU_OPTIONS
+2. DRAWING_RULES
+
+修改注意事项：
+- 新增 SKU 时，必须同步检查 DRAWING_RULES
+- 不要在 GUI 中硬编码图纸号
+- 图纸号仅由 SKU 自动推导
+
+====================================================
+"""
+
+# 字体样式配置
+
+FONT_CONFIG = {
+    "name": "Calibri",
+    "size": 11,
+    "bold": False,
+    "color": "000000"  # 黑色
+}
+
+# Step文本配置
+STEP_TEXT = {
+    "title": "{po_number} outgoing inspection reference pictures",
+    "sku_label": "SKU：",
+    "date_label": "Data：",
+    "inspector_label": "Inspector：",
+    "step1": "Step 1) Check shipping case and shipping case label--Correct",
+    "step2": "Step 2) Check if there still have share edge issue, touch by hand --No share edge issue was found by touch by hand",
+    "step3": "Step 3) Check if there is a oval key code label on back-- Yes,  6pcs same key codes on 6 each invidual pack was witnessed in a shipping case",
+    "step4": "Step 4) check if the nut-push on hold the keys correctly-- all nut are pressed to the end , they are holding keys in reliable, there is no risk to drop the nut.",
+    "step5_title": "Step 5) Unlock it from molde cards to check:",
+    "step5_1": "a) If the key code on keys are same as that on oval key code label- All are correct",
+    "step5_2": "b) If there are scratches on front/back housing and bumper -No scratch was found",
+    "step5_3": "c) If there is discoloration or holes on welding line and adjacent area- No findings",
+    "step5_4": "d) If there is sharp corner on both ends shackle holes - No sharp corners was found",
+    "step5_5": "e) If \"Master\" logo are wiped uniformly -- Yes, all are wiped uniformlly",
+    "step5_6": "f)  If it is easy to insert key and extract key  -- Yes, all are easy to insert key and extract key",
+    "step5_7": "g) If it is easy and smooth to turn key to open and close shackle 3 times --Yes, all are easy for operation, shacking moving smoothly",
+    "step5_8": "h) If there is scratch on shackle after 3 times lock/unlock -- There is no scratch on shackle after 3 times lock/unlock",
+    "step5_9": "i) if the key cover door can be moved easily,and can hold on open/closed status -- Yes, all key covers can be moved easily and can hold on open/closed status",
+    "step5_10": "j) If the draining hole on bumper and the back housing are aligned -- Yes, all the draining holes are sligned",
+    "step5_11": "k) If the surface of plug is plated uniformly. -- -- Yes, all samples show the surface of plug are plated uniformly."
+}
+
+# Step5子项与图片步骤映射（统一格式）
+STEP5_IMAGE_MAP = {
+    "step5_4": "Step 5（1）",
+    "step5_5": "Step 5（2）",
+    "step5_8": "Step 5（3）",
+    "step5_10": "Step 5（4）",
+    "step5_11": "Step 5（5）"
+}
+
+# 图片尺寸配置
+IMAGE_CONFIG = {
+    "width": 160,
+    "height": 120,
+    "row_height": 100,  # 图片行高
+    "fixed_col_width": 8, # 固定列宽
+    "fixed_col_gap": 2,  # 固定列间隔
+    "img_gap_px": 10,
+    "col_offset_step": 4
+
+}
+
+# 边框样式配置（黑色细边框）
+BORDER_CONFIG = {
+    "style": "medium",
+    "color": "000000"   # 黑色
+}
+DEFECT_WORDS = ["问题", "(缺陷)"]
+
+# 缺陷图片网格布局配置
+DEFECT_IMAGE_CONFIG = {
+    "start_cell": "B54",      # 起始位置
+    "max_cols": 2,            # 横向最多2张
+    "width": 282,             # 增加宽度以适应4列的跨度
+    "height": 230,            # 增加高度以保持比例
+    "col_span": 4,            # 每张图片跨越4列 (第一张 B-E, 第二张 F-I)
+    "row_span": 14            # 每行图片占用的Excel行数 (54-67行)
+}
+
+# 可选料号列表
+SKU_OPTIONS = [
+    "P12329/M40XKADCCSEN",
+    "P12330/M40XTCCSEN",
+    "P18493/M40XTRIHCSEC",
+    "P55986/M40EURDCC",
+    "P51710/M40BLCTRIHCSEC",
+    "79865/M40EURT",
+    "85274/M40BLCDHC",
+    "109862/M40XDHC",
+    "109863/M40XTHC",
+    "P10539/M40KA",
+    "P30334/M40DAU",
+    "P51711/M40BLCKADCCSEN",
+    "P61543/M40BLCTHC",
+    "P12332/M50XKADCCSEN",
+    "P51716/M50BLCKADCCSEN",
+    "P55987/M50EURDCC",
+    "P61545/M50BLCKADHC",
+    "P61718/M50XTCCSEN",
+    "P105300/M40XKADHC",
+    "P105305/M40XTHC",
+    "P105311/M50XKADHC",
+    "P105316/M50XTCC"
+]
+DRAWING_RULES = {
+    "M40": "64443 Rev.K",
+    "M50": "64678 Rev.J"
+}
+
