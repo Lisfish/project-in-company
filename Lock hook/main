@@ -1,0 +1,495 @@
+import os
+from datetime import datetime
+from pathlib import Path
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+from PIL import Image, ImageTk
+import openpyxl
+from openpyxl.drawing.image import Image as ExcelImage
+from openpyxl.styles import Font, Border, Side
+from openpyxl.utils import get_column_letter, column_index_from_string
+import sys
+
+
+class InspectionReportGenerator:
+    def __init__(self):
+        self.wb = None
+        self.last_error = ''
+        self.template_path = None
+        self.defect_images = []
+        self.sampling_plan = {
+            'ranges': [(151, 280), (281, 500), (501, 1200), (1201, 3200),
+                       (3201, 10000), (10001, 35000), (35001, float('inf'))],
+            'sample_sizes': [13, 20, 32, 50, 80, 125, 200],
+            'critical': [0, 0, 0, 0, 0, 0, 0],
+            'major': [0, 0, 0, 1, 2, 3, 5],
+            'minor': [0, 1, 2, 3, 5, 7, 10]
+        }
+
+
+    def _set_error(self, exc: Exception, context: str = ""):
+        msg = f"{context}: {exc}" if context else str(exc)
+        self.last_error = msg
+        print(f"[ERROR] {msg}", file=sys.stderr)
+
+    @staticmethod
+    def _parse_int(value):
+        """Parse an int from GUI input. Accepts int/float/str like '1,000'. Empty -> 0."""
+        if value is None:
+            return 0
+        if isinstance(value, (int,)):
+            return int(value)
+        if isinstance(value, float):
+            return int(value)
+        s = str(value).strip()
+        if s == "":
+            return 0
+        s = s.replace(",", "")
+        return int(s)
+
+    def load_template(self, template_path):
+        try:
+            self.wb = openpyxl.load_workbook(template_path)
+            self.template_path = template_path
+            return True
+        except Exception as e:
+            self._set_error(e, 'load_template')
+            return False
+
+    def fill_basic_info(self, data):
+        try:
+            ws = self.wb['出货检查表']
+            ws['C4'] = data.get('inspector', '')
+            ws['G4'] = data.get('inspection_date', '')
+            ws['C5'] = data.get('customer', '')
+            ws['G5'] = data.get('po_number', '')
+            ws['C6'] = data.get('sku', '')
+            ws['F6'] = f"客户图纸及版本号：{data.get('drawing_no', '')}"
+            ws['C7'] = data.get('ship_date', '')
+            ws['G7'] = str(data.get('ship_quantity', ''))
+            ws['B3'] = f'出货检查报告编号 {data.get("report_no", "")}'
+            ws['B38'] = f"检验员签名/日期：{data.get('inspector', '')}/{data.get('inspection_date', '')}"
+            ws['C39'] = data.get('approver', '')
+            ws['D39'] = f"批准人签名/日期：{data.get('approver', '')}/{data.get('approval_date', '')}"
+
+            qty = self._parse_int(data.get('ship_quantity', 0))
+            matched = False
+            for i, (min_qty, max_qty) in enumerate(self.sampling_plan['ranges']):
+                if min_qty <= qty <= max_qty:
+                    col = get_column_letter(3 + i)
+                    ws[f"{col}10"] = qty
+                    ws[f"{col}11"] = self.sampling_plan['sample_sizes'][i]
+                    ws[f"{col}12"] = self.sampling_plan['critical'][i]
+                    ws[f"{col}13"] = self.sampling_plan['major'][i]
+                    ws[f"{col}14"] = self.sampling_plan['minor'][i]
+                    red_font = Font(name='Arial',color="FF0000",size=8, bold=False)
+                    for r in range(11, 15): ws[f"{col}{r}"].font = red_font
+                    matched = True
+                    break
+            if not matched:
+                raise ValueError(f"ship_quantity={qty} not covered by sampling_plan ranges")
+            return True
+        except Exception as e:
+            self._set_error(e, 'fill_basic_info')
+            return False
+
+    def import_raw_data(self, raw_data_path, data_info):
+        """导入数据：限制200行，并自动清理无数据行的G列"""
+        try:
+            po = data_info.get('po_number', '')
+            target_ws = None
+            for sheetname in self.wb.sheetnames:
+                if "raw data" in sheetname.lower():
+                    target_ws = self.wb[sheetname]
+                    target_ws.title = f"raw data PO{po}"
+                    break
+            if not target_ws: return False
+
+            # 填充表头与规格
+            target_ws['B1'] = f"No.5 shackle, {data_info.get('sku', '')} 检测数据记录"
+            target_ws['B2'] = f"PO:{po}"
+            target_ws['G2'] = data_info.get('ship_date', '')
+            target_ws['G3'] = data_info.get('inspector', '')
+            target_ws['C7'] = data_info.get('spec_diff', '')
+            target_ws['D7'] = data_info.get('spec_long', '')
+            target_ws['E7'] = data_info.get('spec_short', '')
+            target_ws['F7'] = data_info.get('spec_flat', '')
+
+            # 读取原始数据
+            source_rows = []
+            ext = os.path.splitext(raw_data_path)[1].lower()
+            if ext == '.xlsx':
+                raw_wb = openpyxl.load_workbook(raw_data_path, data_only=True)
+                raw_ws = raw_wb.active
+                for row in raw_ws.iter_rows(min_row=2, values_only=True):
+                    if any(row): source_rows.append(row)
+            elif ext == '.xls':
+                import xlrd
+                raw_wb = xlrd.open_workbook(raw_data_path)
+                raw_ws = raw_wb.sheet_by_index(0)
+                for r in range(1, raw_ws.nrows):
+                    source_rows.append(raw_ws.row_values(r))
+
+            col_map = {0: 'B', 2: 'C', 3: 'D', 4: 'E', 5: 'F'}
+
+            for i in range(200):  # 循环200次
+                t_row = i + 8
+
+                # 先清理G列，避免模板残留
+                target_ws[f"G{t_row}"] = None
+
+                if i < len(source_rows):
+                    # 有数据的情况：填充 B,C,D,E,F 列
+                    row_data = source_rows[i]
+                    for s_idx, t_col in col_map.items():
+                        if s_idx < len(row_data):
+                            target_ws[f"{t_col}{t_row}"] = row_data[s_idx]
+                        else:
+                            target_ws[f"{t_col}{t_row}"] = None
+                else:
+                    # 超过原始数据行数的情况：清除该行的内容
+                    for t_col in ['B', 'C', 'D', 'E', 'F']:
+                        target_ws[f"{t_col}{t_row}"] = None
+
+
+            return True
+        except Exception as e:
+            self._set_error(e, 'import_raw_data')
+            return False
+
+    def add_defect_records(self, defects):
+        """Write up to 8 defect records into the report sheet."""
+        try:
+            ws = self.wb['出货检查表']
+            for i, d in enumerate(defects[:8]):
+                ws[f'C{20 + i}'] = d.get('description', '')
+                ws[f'G{20 + i}'] = d.get('critical', 0)
+                ws[f'H{20 + i}'] = d.get('major', 0)
+                ws[f'I{20 + i}'] = d.get('minor', 0)
+            return True
+        except Exception as e:
+            self._set_error(e, 'add_defect_records')
+            return False
+
+
+    def rename_and_get_defects(self, image_checkbuttons):
+        """Collect defect image paths based on GUI selections.
+        Note: does NOT rename files on disk (safer for repeat runs).
+        """
+        self.defect_images = []
+        for path, info in image_checkbuttons.items():
+            try:
+                if info['use_var'].get() and info['defect_var'].get():
+                    self.defect_images.append(path)
+            except Exception as e:
+                # continue collecting others, but keep error for debugging
+                self._set_error(e, 'rename_and_get_defects')
+        return self.defect_images
+
+
+    def insert_defect_images(self, wb):
+        ws = wb['出货检查表']
+        # 起始位置：B42
+        start_row, start_col = 42, column_index_from_string("B")
+
+        # 获取去重后的图片列表
+        unique_images = list(dict.fromkeys(self.defect_images))
+
+        for i, img_path in enumerate(unique_images):
+            # r_idx 决定行，c_idx 决定列 (0为左列B, 1为右列F)
+            r_idx, c_idx = i // 2, i % 2
+
+            row_offset = 13  # 每组图片占用15行
+            curr_row = start_row + (r_idx * row_offset)
+            curr_col = start_col + (c_idx * 4)  # B列(2) + 4 = F列(6)
+
+            try:
+                img = ExcelImage(img_path)
+                # 保持 280x220 尺寸
+                img.width, img.height = 280, 220
+
+                # 插入图片
+                ws.add_image(img, f"{get_column_letter(curr_col)}{curr_row}")
+
+                # 画方框：跨度改为 row_offset，确保边框紧贴
+                self._apply_border(ws, curr_row, curr_col, row_offset, 4)
+            except Exception as e:
+                print(f"图片 {img_path} 插入失败: {e}")
+
+    def _apply_border(self, ws, row, col, r_span, c_span):
+        """Apply a rectangle border without merging cells (avoids breaking template layout)."""
+        side = Side(style='medium', color="000000")
+        border = Border(top=side, left=side, right=side, bottom=side)
+        for r in range(row, row + r_span):
+            for c in range(col, col + c_span):
+                ws.cell(row=r, column=c).border = border
+
+
+    def save_report(self, output_path):
+        self.wb.save(output_path);
+        return True
+
+
+class InspectionReportGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("M40锁钩报告生成工具")
+        self.root.geometry("1100x850")
+        if getattr(sys, 'frozen', False):
+            # 如果是打包后的 .exe 运行，获取 .exe 所在目录
+            self.base_dir = os.path.dirname(sys.executable)
+        else:
+            # 如果是 python 脚本运行，获取脚本所在目录
+            self.base_dir = os.path.dirname(os.path.abspath(__file__))
+        default_template_name = "模板.xlsx"
+        self.default_template_path = os.path.join(self.base_dir, default_template_name)
+        self.generator = InspectionReportGenerator()
+        self.vars = {}
+        self.image_checkbuttons = {}
+        self.create_widgets()
+
+        if os.path.exists(self.default_template_path):
+
+            self.vars['template'].set(self.default_template_path)
+            self.generator.load_template(self.default_template_path)
+
+    def create_widgets(self):
+        pw = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
+        pw.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # --- 左侧：M40 原始输入 ---
+        left_main = ttk.Frame(pw, padding="5")
+        pw.add(left_main, weight=1)
+
+        info_lf = ttk.LabelFrame(left_main, text="报告详细信息", padding="10")
+        info_lf.pack(fill=tk.BOTH, expand=True)
+
+        canvas_l = tk.Canvas(info_lf, highlightthickness=0)
+        sb_l = ttk.Scrollbar(info_lf, orient="vertical", command=canvas_l.yview)
+        self.scroll_frame = ttk.Frame(canvas_l)
+        self.scroll_frame.bind("<Configure>", lambda e: canvas_l.configure(scrollregion=canvas_l.bbox("all")))
+        canvas_l.create_window((0, 0), window=self.scroll_frame, anchor="nw")
+        canvas_l.configure(yscrollcommand=sb_l.set)
+        sb_l.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas_l.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        fields = [
+            ("Excel模板:", "template", True), ("原始数据表:", "raw_data_path", True),
+            ("检验员:", "inspector", False),
+            ("检验日期:", "inspection_date", False, datetime.now().strftime("%Y/%m/%d")),
+            ("客户订单号:", "po_number", False), ("料号:", "sku", False, "P52618_DS"),
+            ("客户:", "customer", False, "Master Lock"), ("客户图纸及版本:", "drawing_no", False, "64678 Rev.J"),
+            ("批准人:", "approver", False, "Gary Tu"),
+            ("批准日期:", "approval_date", False, datetime.now().strftime("%Y/%m/%d")),
+            ("出货数量:", "ship_quantity", False),
+            ("计划出货日期:", "ship_date", False, datetime.now().strftime("%Y/%m/%d")),
+            ("两脚差规格:", "spec_diff", False, "17.48~18.24"), ("长脚规格:", "spec_long", False, "5.13~5.39"),
+            ("短脚规格:", "spec_short", False, "5.13~5.39"), ("拉平位规格:", "spec_flat", False, "7.54~7.70")
+        ]
+
+        self.scroll_frame.columnconfigure(1, weight=1)
+        for i, f in enumerate(fields):
+            ttk.Label(self.scroll_frame, text=f[0]).grid(row=i, column=0, sticky="w", pady=5)
+            v = tk.StringVar(value=f[3] if len(f) > 3 else "")
+            self.vars[f[1]] = v
+            ent = ttk.Entry(self.scroll_frame, textvariable=v)
+            ent.grid(row=i, column=1, sticky="ew", pady=5, padx=5)
+            if f[1] == "template":
+                ttk.Button(self.scroll_frame, text="浏览...", command=self.browse_template).grid(row=i, column=2)
+            elif f[1] == "raw_data_path":
+                ttk.Button(self.scroll_frame, text="选择...", command=self.browse_raw_data).grid(row=i, column=2)
+
+        r_idx = len(fields)
+        self.report_no_var = tk.StringVar()
+        ttk.Label(self.scroll_frame, text="报告编号:").grid(row=r_idx, column=0, sticky="w")
+        ttk.Entry(self.scroll_frame, textvariable=self.report_no_var).grid(row=r_idx, column=1, sticky="ew", padx=5)
+        ttk.Button(self.scroll_frame, text="自动生成",
+                   command=lambda: self.report_no_var.set(f"OI{datetime.now().strftime('%y%m%d-%H%M')}")).grid(
+            row=r_idx, column=2)
+
+        ttk.Label(self.scroll_frame, text="缺陷记录:", font=('微软雅黑', 10, 'bold')).grid(row=r_idx + 1, column=0,
+                                                                                           columnspan=3, sticky="w",
+                                                                                           pady=(15, 5))
+        headers = ["序号", "缺陷描述", "致命", "严重", "轻微"]
+        for c, h in enumerate(headers): ttk.Label(self.scroll_frame, text=h, font=('微软雅黑', 9, 'bold')).grid(
+            row=r_idx + 2, column=c)
+        self.defect_vars = []
+        for i in range(8):
+            r = r_idx + 3 + i
+            ttk.Label(self.scroll_frame, text=str(i + 1)).grid(row=r, column=0)
+            d_v = tk.StringVar()
+            ttk.Entry(self.scroll_frame, textvariable=d_v, width=20).grid(row=r, column=1, sticky="ew", padx=2)
+            row_set = [d_v]
+            for c in range(2, 5):
+                v = tk.StringVar(value="0")
+                ttk.Entry(self.scroll_frame, textvariable=v, width=5).grid(row=r, column=c, padx=2)
+                row_set.append(v)
+            self.defect_vars.append(row_set)
+
+        btn_f = ttk.Frame(left_main)
+        btn_f.pack(fill="x", pady=10)
+        ttk.Button(btn_f, text="生成报告", command=self.generate_report).pack(side="left", padx=5)
+        ttk.Button(btn_f, text="清除数据", command=self.clear_data).pack(side="left", padx=5)
+
+        # --- 右侧：M501 图片管理逻辑 ---
+        right_main = ttk.LabelFrame(pw, text="缺陷图片管理", padding="5")
+        pw.add(right_main, weight=1)
+
+        t_f = ttk.Frame(right_main)
+        t_f.pack(fill="x", pady=5)
+        ttk.Button(t_f, text="选择文件夹", command=self.browse_images).pack(side="left")
+        self.img_count_v = tk.StringVar(value="已加载: 0张")
+        ttk.Label(t_f, textvariable=self.img_count_v, foreground="blue").pack(side="right")
+
+        self.img_canvas = tk.Canvas(right_main, highlightthickness=0)
+        sb_r = ttk.Scrollbar(right_main, orient="vertical", command=self.img_canvas.yview)
+        self.scrollable_img_frame = ttk.Frame(self.img_canvas)
+        self.scrollable_img_frame.bind("<Configure>",
+                                       lambda e: self.img_canvas.configure(scrollregion=self.img_canvas.bbox("all")))
+        self.img_canvas.create_window((0, 0), window=self.scrollable_img_frame, anchor="nw")
+        self.img_canvas.configure(yscrollcommand=sb_r.set)
+        sb_r.pack(side="right", fill="y")
+        self.img_canvas.pack(side="left", fill="both", expand=True)
+
+    def browse_template(self):
+        f = filedialog.askopenfilename(filetypes=[("Excel", "*.xlsx")])
+        if f: self.vars['template'].set(f)
+
+    def browse_raw_data(self):
+        f = filedialog.askopenfilename(filetypes=[("Excel", "*.xlsx *.xls")])
+        if f: self.vars['raw_data_path'].set(f)
+
+    def browse_images(self):
+        folder = filedialog.askdirectory()
+        if not folder: return
+        for w in self.scrollable_img_frame.winfo_children(): w.destroy()
+        self.image_checkbuttons.clear()
+        files = [f for f in os.listdir(folder) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+        for f in files: self.add_image_item(os.path.join(folder, f))
+        self.img_count_v.set(f"已加载: {len(files)}张")
+
+    def add_image_item(self, path):
+        # M501 逻辑：方框包裹 + 文件名换行
+        item_f = ttk.Frame(self.scrollable_img_frame, relief="groove", borderwidth=1, padding=5)
+        item_f.pack(fill="x", padx=5, pady=5)
+
+        try:
+            img = Image.open(path);
+            img.thumbnail((120, 90))
+            tk_img = ImageTk.PhotoImage(img)
+
+            img_lbl = tk.Label(item_f, image=tk_img)
+            img_lbl.image = tk_img
+            img_lbl.pack(side="left", padx=5)
+
+            info_f = ttk.Frame(item_f)
+            info_f.pack(side="left", fill="both", expand=True)
+
+            # 文件名自动换行
+            name_v = os.path.basename(path)
+            tk.Label(info_f, text=name_v, wraplength=180, justify="left", font=("微软雅黑", 9)).pack(anchor="w")
+
+            ctrl_f = ttk.Frame(item_f)
+            ctrl_f.pack(side="right")
+            c1, c2 = tk.BooleanVar(value=True), tk.BooleanVar(value="(缺陷)" in name_v)
+            ttk.Checkbutton(ctrl_f, text="选用", variable=c1).pack(side="left", padx=2)
+            ttk.Checkbutton(ctrl_f, text="缺陷", variable=c2).pack(side="left", padx=2)
+            self.image_checkbuttons[path] = {'use_var': c1, 'defect_var': c2}
+        except Exception as e:
+            messagebox.showerror('图片加载失败', f'无法加载图片:\n{path}\n\n原因: {e}')
+
+    def generate_report(self):
+        if not self.vars['template'].get() or not self.vars['raw_data_path'].get():
+            messagebox.showerror("错误", "请选择模板和数据")
+            return
+
+        # 1) 收集勾选的缺陷图片（不改动磁盘文件名）
+        defect_paths = self.generator.rename_and_get_defects(self.image_checkbuttons)
+
+        # 2) 准备数据
+        data = {k: v.get().strip() for k, v in self.vars.items()}
+        data['report_no'] = self.report_no_var.get()
+
+        # 3) 生成
+        if not self.generator.load_template(data['template']):
+            messagebox.showerror("失败", f"模板加载失败：\n{self.generator.last_error}")
+            return
+
+        if not self.generator.fill_basic_info(data):
+            messagebox.showerror("失败", f"基础信息填写失败：\n{self.generator.last_error}")
+            return
+
+        if not self.generator.import_raw_data(data['raw_data_path'], data):
+            messagebox.showerror("失败", f"Raw Data 导入失败：\n{self.generator.last_error}")
+            return
+
+        defects = []
+        for rv in self.defect_vars:
+            desc = rv[0].get().strip()
+            if desc:
+                try:
+                    defects.append({
+                        'description': desc,
+                        'critical': self.generator._parse_int(rv[1].get() or 0),
+                        'major': self.generator._parse_int(rv[2].get() or 0),
+                        'minor': self.generator._parse_int(rv[3].get() or 0),
+                    })
+                except Exception as e:
+                    messagebox.showerror("错误", f"缺陷数量必须是整数：\n{e}")
+                    return
+
+        if not self.generator.add_defect_records(defects):
+            messagebox.showerror("失败", f"缺陷记录写入失败：\n{self.generator.last_error}")
+            return
+
+        if defect_paths:
+            self.generator.defect_images = defect_paths
+            try:
+                self.generator.insert_defect_images(self.generator.wb)
+            except Exception as e:
+                messagebox.showerror("失败", f"插入缺陷图片失败：\n{e}")
+                return
+
+        out = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            initialfile=f"M40_Report_{data.get('po_number','')}.xlsx"
+        )
+        if not out:
+            return
+
+        try:
+            self.generator.save_report(out)
+        except Exception as e:
+            messagebox.showerror("失败", f"保存失败：\n{e}")
+            return
+
+        messagebox.showinfo("成功", "报告已生成")
+
+        if messagebox.askyesno("打开", "是否打开生成的报告？"):
+            try:
+                if sys.platform.startswith("win"):
+                    os.startfile(out)  # type: ignore[attr-defined]
+                elif sys.platform == "darwin":
+                    import subprocess
+                    subprocess.run(["open", out], check=False)
+                else:
+                    import subprocess
+                    subprocess.run(["xdg-open", out], check=False)
+            except Exception as e:
+                messagebox.showwarning("提示", f"已生成报告，但自动打开失败：\n{e}")
+
+    def clear_data(self):
+        for v in self.vars.values(): v.set("")
+        self.report_no_var.set("")
+        for rv in self.defect_vars:
+            rv[0].set("");
+            [rv[i].set("0") for i in range(1, 4)]
+        for w in self.scrollable_img_frame.winfo_children(): w.destroy()
+        self.image_checkbuttons.clear();
+        self.img_count_v.set("已加载: 0张")
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = InspectionReportGUI(root)
+    root.mainloop()
